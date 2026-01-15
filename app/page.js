@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import Papa from "papaparse";
 import { Search, Settings, Upload, MapPin, User, Star, Filter, Sparkles, Loader2, TrendingUp, Eye, Smartphone, Zap } from "lucide-react";
 import { DEFAULT_DATA } from "./lib/data";
+import pinyin from "tiny-pinyin"; // 引入拼音库
 
 // 湖南省行政区划常量
 const LOCATION_OPTIONS = [
@@ -14,7 +15,7 @@ const LOCATION_OPTIONS = [
 
 // 发布渠道常量
 const CHANNEL_OPTIONS = [
-  "Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序"
+  "Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序", "PC端", "自助终端"
 ];
 
 export default function Home() {
@@ -41,17 +42,77 @@ export default function Home() {
 
   const fileInputRef = useRef(null);
 
-  // --- 数据预处理 ---
+  // --- 辅助算法：编辑距离 (Levenshtein Distance) ---
+  // 用于计算两个字符串的相似度，支持错别字识别
+  const getEditDistance = (a, b) => {
+    if (a.length === 0) return b.length;
+    if (b.length === 0) return a.length;
+
+    const matrix = [];
+
+    for (let i = 0; i <= b.length; i++) {
+      matrix[i] = [i];
+    }
+
+    for (let j = 0; j <= a.length; j++) {
+      matrix[0][j] = j;
+    }
+
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) {
+          matrix[i][j] = matrix[i - 1][j - 1];
+        } else {
+          matrix[i][j] = Math.min(
+            matrix[i - 1][j - 1] + 1, // 替换
+            Math.min(
+              matrix[i][j - 1] + 1,   // 插入
+              matrix[i - 1][j] + 1    // 删除
+            )
+          );
+        }
+      }
+    }
+
+    return matrix[b.length][a.length];
+  };
+
+  // --- 数据预处理 (增加拼音生成) ---
   const processData = (rawData) => {
     return rawData.map(item => {
-      const searchStr = `${item["事项名称"]}|${item["事项简称"]}|${item["事项标签"]}|${item["事项分类"]}`.toLowerCase();
+      const name = item["事项名称"] || "";
+      const searchStr = `${name}|${item["事项简称"]}|${item["事项标签"]}|${item["事项分类"]}`.toLowerCase();
+      
       let visits = 0;
       if (item["访问量"]) {
         visits = parseInt(String(item["访问量"]).replace(/,/g, ""), 10) || 0;
       } else if (item["搜索量"]) {
         visits = parseInt(String(item["搜索量"]).replace(/,/g, ""), 10) || 0;
       }
-      return { ...item, _searchStr: searchStr, _visits: visits };
+
+      // 生成全拼和首字母
+      // 示例: "身份证" -> full: "shenfenzheng", acronym: "sfz"
+      let pyFull = "";
+      let pyAcronym = "";
+      
+      if (pinyin.isSupported()) {
+          pyFull = pinyin.convertToPinyin(name, '', true); // true = 保持非中文字符
+          // 生成首字母
+          for (let char of name) {
+            const charPy = pinyin.convertToPinyin(char, '', true);
+            if (charPy && charPy.length > 0) {
+                pyAcronym += charPy[0];
+            }
+          }
+      }
+
+      return { 
+        ...item, 
+        _searchStr: searchStr, 
+        _visits: visits,
+        _pyFull: pyFull,
+        _pyAcronym: pyAcronym
+      };
     });
   };
 
@@ -83,7 +144,7 @@ export default function Home() {
     setConfig(newConfig);
   };
 
-  // --- 智能评分与过滤算法 ---
+  // --- 智能评分与过滤算法 (V4: 拼音 + 纠错 + 语义 + 热度 + 地域) ---
   const calculateScore = (item, cleanQuery, synonyms = []) => {
     // 1. 硬性过滤（渠道）
     if (selectedChannel !== "全部渠道") {
@@ -96,7 +157,7 @@ export default function Home() {
     const itemName = item["事项名称"].toLowerCase();
     let isRelevant = false;
 
-    // 2. 意图相关性评分
+    // --- A. 精准/部分匹配 (Priority 1: 100分) ---
     if (searchStr.includes(cleanQuery)) {
       score += 100;
       isRelevant = true;
@@ -104,6 +165,44 @@ export default function Home() {
       if (itemName === cleanQuery) score += 50;
     }
 
+    // --- B. 拼音匹配 (Priority 2: 90分) ---
+    // 只有当查询词是纯英文/数字时才启用，避免中文误判
+    const isAscii = /^[a-zA-Z0-9]+$/.test(cleanQuery);
+    if (!isRelevant && isAscii) {
+        // 匹配全拼 (如 shenfenzheng)
+        if (item._pyFull.includes(cleanQuery)) {
+            score += 90;
+            isRelevant = true;
+        }
+        // 匹配首字母 (如 sfz)
+        else if (item._pyAcronym.includes(cleanQuery)) {
+            score += 85; // 首字母权重略低
+            isRelevant = true;
+        }
+    }
+
+    // --- C. 错别字容错/模糊匹配 (Priority 3: 75分) ---
+    // 如果还没匹配上，且查询词长度 > 1 (单字不纠错)
+    if (!isRelevant && cleanQuery.length > 1) {
+        // 计算编辑距离
+        // 优化：只对名称的前10个字计算，提升性能
+        const targetName = itemName.substring(0, 10);
+        const distance = getEditDistance(cleanQuery, targetName);
+        
+        // 容错规则：
+        // 1. 距离 <= 1 (1个错别字) -> 允许
+        // 2. 距离 <= 2 且 查询词长度 >= 4 (长词允许2个错别字) -> 允许
+        const allowFuzzy = distance <= 1 || (distance <= 2 && cleanQuery.length >= 4);
+        
+        if (allowFuzzy) {
+            // 还需要确保不是完全不搭界 (比如距离小是因为词都很短)
+            // 这里简单处理：如果允许模糊，则认为相关
+            score += 75 - (distance * 10); // 距离越远分越低
+            isRelevant = true;
+        }
+    }
+
+    // --- D. AI 同义词匹配 (Priority 4: 60分) ---
     if (synonyms.length > 0) {
       synonyms.forEach(word => {
         const w = word.toLowerCase();
@@ -114,60 +213,48 @@ export default function Home() {
       });
     }
 
-    let charMatchCount = 0;
-    for (let char of cleanQuery) {
-      if (searchStr.includes(char)) charMatchCount++;
-    }
-    const coverage = charMatchCount / (cleanQuery.length || 1);
-    if (coverage > 0.6) {
-      score += coverage * 40;
-      isRelevant = true;
+    // --- E. 字符覆盖率 (Priority 5: 40分) ---
+    if (!isRelevant) {
+        let charMatchCount = 0;
+        for (let char of cleanQuery) {
+          if (searchStr.includes(char)) charMatchCount++;
+        }
+        const coverage = charMatchCount / (cleanQuery.length || 1);
+        if (coverage > 0.6) {
+          score += coverage * 40;
+          isRelevant = true;
+        }
     }
 
-    // 如果不相关且没有选择“全部地区”（防止纯浏览时被过滤），则直接排除
-    // 但如果有搜索词，必须相关
-    if (cleanQuery && !isRelevant) return -1;
+    // 如果完全不相关
+    if (!isRelevant) return -1;
 
-    // 3. 地理位置分级加权 (核心优化部分)
-    // 逻辑：选中城市(Priority 1) > 省本级(Priority 2) > 其他城市(Priority 3)
+    // 2. 地理位置分级加权 (优化版)
     if (userLocation !== "全部地区") {
-      // 提取核心地名关键字 (如 "长沙市" -> "长沙", "湘西..." -> "湘西")
       let targetCityKey = userLocation;
       if (targetCityKey.endsWith("市")) targetCityKey = targetCityKey.slice(0, -1);
       if (targetCityKey.includes("湘西")) targetCityKey = "湘西";
       
       const itemLoc = item["所属市州单位"] || "";
 
-      if (itemLoc.includes(targetCityKey)) {
-        // 第一梯队：精准命中选中城市 -> 大幅加分
-        score += 50;
-      } else if (
-        itemLoc.includes("省本级") || 
-        itemLoc.includes("全省") || 
-        itemLoc.includes("湖南省") ||
-        itemLoc === "通用"
-      ) {
-        // 第二梯队：省本级/通用 -> 中幅加分
-        score += 25;
-      } else {
-        // 第三梯队：其他地市 -> 扣分 (排在最后)
-        score -= 50;
-      }
+      if (itemLoc.includes(targetCityKey)) score += 50;
+      else if (itemLoc.includes("省本级") || itemLoc.includes("全省") || itemLoc.includes("湖南省") || itemLoc === "通用") score += 25;
+      else score -= 50;
     }
 
-    // 4. 用户角色加权
+    // 3. 用户角色加权
     if (userRole !== "全部") {
       if (item["服务对象"] === userRole) score += 20;
       else score -= 20;
     }
 
-    // 5. 热度加权
+    // 4. 热度加权
     if (item._visits > 0) score += Math.log10(item._visits + 1) * 8;
     
-    // 6. 高频标识加权
+    // 5. 高频标识
     if (item["是否高频事项"] === "是") score += 10;
     
-    // 7. 满意度加权
+    // 6. 满意度
     if (config.enableSatisfactionSort && item["满意度"]) {
       score += parseFloat(item["满意度"]) * 2;
     }
@@ -176,15 +263,17 @@ export default function Home() {
   };
 
   const handleSearch = async () => {
-    const cleanQuery = query.trim().toLowerCase().replace(/[我要想办理怎么查询了]/g, "");
+    // 保留原始查询词用于拼音/模糊匹配 (不去掉空格等，但转小写)
+    const rawQuery = query.trim().toLowerCase();
+    const cleanQuery = rawQuery.replace(/[我要想办理怎么查询了]/g, "");
     
     setIsSearching(true);
     setSearchResults([]); 
 
     let currentSynonyms = [];
 
-    // 1. AI 分析
-    if (query.trim() && config.apiKey) {
+    // AI 分析 (仅针对清洗后的中文语义)
+    if (cleanQuery && config.apiKey) {
       try {
         const res = await fetch("/api/analyze", {
           method: "POST",
@@ -195,10 +284,7 @@ export default function Home() {
         if (data && !data.error) {
           setAnalyzedIntent(data);
           currentSynonyms = data.synonyms || [];
-          
-          // 智能匹配下拉框的城市
           if (data.location && userLocation === "全部地区") {
-             // 模糊匹配：API返回"长沙" -> 选中"长沙市"
              const matchCity = LOCATION_OPTIONS.find(c => c.includes(data.location));
              if (matchCity) setUserLocation(matchCity);
           }
@@ -211,33 +297,29 @@ export default function Home() {
       }
     }
 
-    // 2. 计算分数
+    // 计算分数
     const scoredData = allData.map(item => {
-      // 无搜索词时的默认排序
-      if (!query.trim()) {
+      // 默认展示逻辑
+      if (!rawQuery) {
         if (selectedChannel !== "全部渠道") {
            const itemChannels = item["发布渠道"] || "";
            if (!itemChannels.toLowerCase().includes(selectedChannel.toLowerCase())) return { item, score: -1 };
         }
-        
         let baseScore = 100;
-        
-        // 即使没搜词，也要执行地理位置排序
         if (userLocation !== "全部地区") {
           let targetCityKey = userLocation;
           if (targetCityKey.endsWith("市")) targetCityKey = targetCityKey.slice(0, -1);
           if (targetCityKey.includes("湘西")) targetCityKey = "湘西";
           const itemLoc = item["所属市州单位"] || "";
-
           if (itemLoc.includes(targetCityKey)) baseScore += 50;
-          else if (itemLoc.includes("省本级") || itemLoc.includes("全省") || itemLoc.includes("湖南省")) baseScore += 25;
+          else if (itemLoc.includes("省本级") || itemLoc.includes("全省")) baseScore += 25;
           else baseScore -= 50;
         }
-
         if (item._visits > 0) baseScore += Math.log10(item._visits + 1) * 8;
         return { item, score: baseScore };
       }
 
+      // 搜索逻辑
       let score = calculateScore(item, cleanQuery, currentSynonyms);
       if (score <= 0) return { item, score: -1 };
 
@@ -270,7 +352,6 @@ export default function Home() {
           const processed = processData(results.data);
           setAllData(processed);
           alert(`导入成功！共 ${results.data.length} 条数据。`);
-          // 重新触发一次搜索以应用当前排序
           setSearchResults(processed.sort((a, b) => b._visits - a._visits).slice(0, 50));
         }
       }
@@ -287,7 +368,7 @@ export default function Home() {
       <div className="w-full max-w-4xl flex justify-between items-center mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">智慧政务服务搜索</h1>
-          <p className="text-slate-500 text-sm mt-1">支持 Groq / DeepSeek / Kimi 等多模型接入</p>
+          <p className="text-slate-500 text-sm mt-1">支持拼音/首字母(sfz) · 错别字纠错 · 多模型</p>
         </div>
         <div className="flex gap-2">
            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" className="hidden" />
@@ -306,7 +387,7 @@ export default function Home() {
           <input
             type="text"
             className="w-full pl-12 pr-24 py-3 bg-slate-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-lg placeholder:text-slate-300"
-            placeholder="请输入您的需求，例如：公积金提取、生孩子..."
+            placeholder="搜“sfz”或“身份征”试试..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
