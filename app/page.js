@@ -14,7 +14,7 @@ const LOCATION_OPTIONS = [
 
 // 发布渠道常量
 const CHANNEL_OPTIONS = [
-  "Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序", "PC端", "自助终端"
+  "Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序"
 ];
 
 export default function Home() {
