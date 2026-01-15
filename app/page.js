@@ -33,7 +33,7 @@ export default function Home() {
   // 配置
   const [showSettings, setShowSettings] = useState(false);
   const [config, setConfig] = useState({
-    apiUrl: "https://api.groq.com/openai/v1/chat/completions", // 默认 Groq
+    apiUrl: "https://api.groq.com/openai/v1/chat/completions",
     apiKey: "",
     model: "llama3-70b-8192",
     enableSatisfactionSort: false,
@@ -68,7 +68,6 @@ export default function Home() {
     setShowSettings(false);
   };
 
-  // --- 快速切换模型预设 ---
   const applyPreset = (type) => {
     let newConfig = { ...config };
     if (type === 'groq') {
@@ -125,12 +124,53 @@ export default function Home() {
       isRelevant = true;
     }
 
-    if (!isRelevant) return -1;
+    // 如果不相关且没有选择“全部地区”（防止纯浏览时被过滤），则直接排除
+    // 但如果有搜索词，必须相关
+    if (cleanQuery && !isRelevant) return -1;
 
-    // 3. 热度加权
+    // 3. 地理位置分级加权 (核心优化部分)
+    // 逻辑：选中城市(Priority 1) > 省本级(Priority 2) > 其他城市(Priority 3)
+    if (userLocation !== "全部地区") {
+      // 提取核心地名关键字 (如 "长沙市" -> "长沙", "湘西..." -> "湘西")
+      let targetCityKey = userLocation;
+      if (targetCityKey.endsWith("市")) targetCityKey = targetCityKey.slice(0, -1);
+      if (targetCityKey.includes("湘西")) targetCityKey = "湘西";
+      
+      const itemLoc = item["所属市州单位"] || "";
+
+      if (itemLoc.includes(targetCityKey)) {
+        // 第一梯队：精准命中选中城市 -> 大幅加分
+        score += 50;
+      } else if (
+        itemLoc.includes("省本级") || 
+        itemLoc.includes("全省") || 
+        itemLoc.includes("湖南省") ||
+        itemLoc === "通用"
+      ) {
+        // 第二梯队：省本级/通用 -> 中幅加分
+        score += 25;
+      } else {
+        // 第三梯队：其他地市 -> 扣分 (排在最后)
+        score -= 50;
+      }
+    }
+
+    // 4. 用户角色加权
+    if (userRole !== "全部") {
+      if (item["服务对象"] === userRole) score += 20;
+      else score -= 20;
+    }
+
+    // 5. 热度加权
     if (item._visits > 0) score += Math.log10(item._visits + 1) * 8;
-    // 4. 高频标识加权
+    
+    // 6. 高频标识加权
     if (item["是否高频事项"] === "是") score += 10;
+    
+    // 7. 满意度加权
+    if (config.enableSatisfactionSort && item["满意度"]) {
+      score += parseFloat(item["满意度"]) * 2;
+    }
 
     return score;
   };
@@ -155,8 +195,10 @@ export default function Home() {
         if (data && !data.error) {
           setAnalyzedIntent(data);
           currentSynonyms = data.synonyms || [];
-          // 智能上下文填入
+          
+          // 智能匹配下拉框的城市
           if (data.location && userLocation === "全部地区") {
+             // 模糊匹配：API返回"长沙" -> 选中"长沙市"
              const matchCity = LOCATION_OPTIONS.find(c => c.includes(data.location));
              if (matchCity) setUserLocation(matchCity);
           }
@@ -171,31 +213,33 @@ export default function Home() {
 
     // 2. 计算分数
     const scoredData = allData.map(item => {
+      // 无搜索词时的默认排序
       if (!query.trim()) {
         if (selectedChannel !== "全部渠道") {
            const itemChannels = item["发布渠道"] || "";
            if (!itemChannels.toLowerCase().includes(selectedChannel.toLowerCase())) return { item, score: -1 };
         }
+        
         let baseScore = 100;
+        
+        // 即使没搜词，也要执行地理位置排序
+        if (userLocation !== "全部地区") {
+          let targetCityKey = userLocation;
+          if (targetCityKey.endsWith("市")) targetCityKey = targetCityKey.slice(0, -1);
+          if (targetCityKey.includes("湘西")) targetCityKey = "湘西";
+          const itemLoc = item["所属市州单位"] || "";
+
+          if (itemLoc.includes(targetCityKey)) baseScore += 50;
+          else if (itemLoc.includes("省本级") || itemLoc.includes("全省") || itemLoc.includes("湖南省")) baseScore += 25;
+          else baseScore -= 50;
+        }
+
         if (item._visits > 0) baseScore += Math.log10(item._visits + 1) * 8;
         return { item, score: baseScore };
       }
 
       let score = calculateScore(item, cleanQuery, currentSynonyms);
       if (score <= 0) return { item, score: -1 };
-
-      if (userRole !== "全部") {
-        if (item["服务对象"] === userRole) score += 20;
-        else score -= 20;
-      }
-      if (userLocation !== "全部地区") {
-        if (item["所属市州单位"].includes(userLocation)) score += 20;
-        else if (item["所属市州单位"].includes("全省") || item["所属市州单位"].includes("省本级")) score += 5;
-        else score -= 50;
-      }
-      if (config.enableSatisfactionSort && item["满意度"]) {
-        score += parseFloat(item["满意度"]) * 2;
-      }
 
       return { item, score };
     });
@@ -226,6 +270,7 @@ export default function Home() {
           const processed = processData(results.data);
           setAllData(processed);
           alert(`导入成功！共 ${results.data.length} 条数据。`);
+          // 重新触发一次搜索以应用当前排序
           setSearchResults(processed.sort((a, b) => b._visits - a._visits).slice(0, 50));
         }
       }
@@ -239,7 +284,6 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-50 flex flex-col items-center py-10 px-4 font-sans">
-      {/* 顶部栏 */}
       <div className="w-full max-w-4xl flex justify-between items-center mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">智慧政务服务搜索</h1>
@@ -256,7 +300,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 搜索与筛选区域 */}
       <div className="w-full max-w-4xl bg-white rounded-xl shadow-lg p-6 mb-6">
         <div className="relative flex items-center mb-4">
           <Search className="absolute left-4 text-slate-400" size={20} />
@@ -316,7 +359,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* 结果列表区 */}
       <div className="w-full max-w-4xl space-y-3">
         {isSearching ? (
           <div className="space-y-4 animate-pulse">
@@ -364,13 +406,11 @@ export default function Home() {
         )}
       </div>
 
-      {/* 设置弹窗 (包含新功能) */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-in fade-in duration-200">
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 overflow-y-auto max-h-[90vh]">
             <h2 className="text-xl font-bold mb-4 text-slate-800">API 与模型配置</h2>
             
-            {/* 快速预设按钮 */}
             <div className="mb-5">
               <label className="block text-xs font-medium text-slate-500 mb-2">快速预设 (点击应用)</label>
               <div className="flex gap-2">
@@ -387,7 +427,6 @@ export default function Home() {
             </div>
 
             <div className="space-y-4">
-              {/* 新增：API URL 配置 */}
               <div>
                 <label className="block text-xs font-medium text-slate-500 mb-1">接口地址 (Base URL)</label>
                 <input 
