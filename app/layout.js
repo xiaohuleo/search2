@@ -11,6 +11,10 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="zh-CN">
+      <head>
+        {/* 核心修复：引入 Tailwind CSS CDN，无需配置文件即可直接渲染样式 */}
+        <script src="https://cdn.tailwindcss.com"></script>
+      </head>
       <body className={inter.className}>{children}</body>
     </html>
   );
