@@ -31,7 +31,7 @@ function getRandomVisits() {
 
 // 辅助函数：随机生成发布渠道组合
 function getRandomChannels() {
-  const allChannels = ["Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序", "PC端", "自助终端"];
+  const allChannels = ["Android", "IOS", "HarmonyOS", "微信小程序", "支付宝小程序"];
   // 随机取 1-5 个渠道
   const count = Math.floor(Math.random() * 5) + 1; 
   const shuffled = allChannels.sort(() => 0.5 - Math.random());
