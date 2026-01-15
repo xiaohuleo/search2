@@ -368,7 +368,7 @@ export default function Home() {
       <div className="w-full max-w-4xl flex justify-between items-center mb-8">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">智慧政务服务搜索</h1>
-          <p className="text-slate-500 text-sm mt-1">支持拼音/首字母(sfz) · 错别字纠错 · 多模型</p>
+          <p className="text-slate-500 text-sm mt-1">错别字纠错 · 多模型</p>
         </div>
         <div className="flex gap-2">
            <input type="file" ref={fileInputRef} onChange={handleFileUpload} accept=".csv" className="hidden" />
@@ -387,7 +387,7 @@ export default function Home() {
           <input
             type="text"
             className="w-full pl-12 pr-24 py-3 bg-slate-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all text-lg placeholder:text-slate-300"
-            placeholder="搜“sfz”或“身份征”试试..."
+            placeholder="输入关键词搜索，如“身份证”..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
